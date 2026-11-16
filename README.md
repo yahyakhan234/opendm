@@ -37,7 +37,7 @@ a crash or a reboot, and catches downloads straight from your browser.
 You need [Python 3.10+](https://www.python.org/downloads/) (check "Add to PATH" and keep "tcl/tk" ticked).
 
 ```bash
-git clone https://github.com/<you>/opendm.git
+git clone https://github.com/yahyakhan234/opendm.git
 cd opendm
 ```
 
