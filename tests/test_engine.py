@@ -6,6 +6,8 @@ Run:  python -m unittest discover -s tests -v
 import hashlib
 import os
 import re
+import select
+import socket
 import shutil
 import sys
 import tempfile
@@ -17,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from opendm.engine import Status  # noqa: E402
+from opendm import engine  # noqa: E402
 from opendm.manager import DownloadManager  # noqa: E402
 
 DATA = os.urandom(12 * 1024 * 1024 + 12345)
@@ -32,6 +35,11 @@ class Handler(BaseHTTPRequestHandler):
     requests = 0
     block_chrome = False  # hang up on clients calling themselves Chrome (like some bot filters)
     agents: list = []
+    max_conns = 0         # >0: serve only this many connections at once (like some servers)
+    over_limit = "trickle"  # what extra connections get: "trickle" (a few bytes/s) or "503"
+    per_conn_rate = 0     # bytes/s per served connection (0 = as fast as possible)
+    active = 0
+    active_lock = threading.Lock()
 
     def log_message(self, *a):
         pass
@@ -44,6 +52,22 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.connection.shutdown(2)  # no response at all
             return
+        cls = type(self)
+        with cls.active_lock:
+            cls.active += 1
+            over = cls.max_conns and cls.active > cls.max_conns
+        try:
+            if over and cls.over_limit == "503":
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self._serve(trickle=bool(over))
+        finally:
+            with cls.active_lock:
+                cls.active -= 1
+
+    def _serve(self, trickle=False):
         start, end = 0, len(DATA) - 1
         rng = self.headers.get("Range")
         m = re.match(r"bytes=(\d+)-(\d*)", rng or "")
@@ -65,10 +89,19 @@ class Handler(BaseHTTPRequestHandler):
                 if self.flaky and sent > 600_000 and type(self).requests % 3 == 0:
                     self.connection.close()  # simulate a dropped connection
                     return
+                if trickle:  # starved connection: 64 bytes now and then
+                    readable, _, _ = select.select([self.connection], [], [], 0.5)
+                    if readable and not self.connection.recv(1, socket.MSG_PEEK):
+                        return  # the client hung up: free the slot right away, like real servers
+                    self.wfile.write(body[sent : sent + 64])
+                    sent += 64
+                    continue
                 self.wfile.write(body[sent : sent + step])
                 sent += step
                 if self.slow or (self.slow_first and start == 0):
                     time.sleep(0.01)
+                if self.per_conn_rate and sent < len(body):  # no pause after the last bytes
+                    time.sleep(step / self.per_conn_rate)
         except (ConnectionError, OSError):
             pass
 
@@ -88,6 +121,9 @@ class EngineTests(unittest.TestCase):
         Handler.flaky = Handler.slow = Handler.slow_first = Handler.block_chrome = False
         Handler.ranges = True
         Handler.agents = []
+        Handler.max_conns = Handler.per_conn_rate = 0
+        Handler.over_limit = "trickle"
+        engine._host_limits.clear()
         self.tmp = tempfile.mkdtemp()
         self.out = os.path.join(self.tmp, "out")
         self.dm = DownloadManager(root=os.path.join(self.tmp, "data"))
@@ -132,6 +168,42 @@ class EngineTests(unittest.TestCase):
         self.wait(dl, {Status.COMPLETE, Status.ERROR})
         self.assertEqual(dl.status, Status.ERROR)
         self.assertEqual(set(Handler.agents), {ua})
+
+    def _limited(self, mode):
+        Handler.max_conns, Handler.over_limit, Handler.per_conn_rate = 2, mode, 1_500_000
+        old = engine.STALL_GRACE, engine.STALL_WINDOW
+        engine.STALL_GRACE = engine.STALL_WINDOW = 1.5  # judge quickly in tests
+        self.addCleanup(lambda: setattr(engine, "STALL_GRACE", old[0]) or setattr(engine, "STALL_WINDOW", old[1]))
+        t = time.time()
+        dl = self.dm.add(self.url, folder=self.out, connections=8)
+        self.wait(dl, {Status.COMPLETE, Status.ERROR}, timeout=40)
+        self.check_file(dl)
+        self.assertLess(time.time() - t, 25, "starved connections must not hold the download up")
+        self.assertEqual(dl.connection_note, "server allows 2 connections")
+        self.assertEqual(engine.learned_limit("127.0.0.1"), 2)
+        # The next download from the same server starts with what was learned.
+        os.remove(dl.final_path)
+        dl2 = self.dm.add(self.url, folder=self.out, connections=8)
+        self.wait(dl2, {Status.COMPLETE, Status.ERROR}, timeout=40)
+        self.check_file(dl2)
+        self.assertEqual(dl2.connection_note, "server allows 2 connections")
+
+    def test_normal_server_keeps_all_connections(self):
+        Handler.per_conn_rate = 400_000  # slow enough that the watchdog gets to judge
+        old = engine.STALL_GRACE, engine.STALL_WINDOW
+        engine.STALL_GRACE = engine.STALL_WINDOW = 1.0
+        self.addCleanup(lambda: setattr(engine, "STALL_GRACE", old[0]) or setattr(engine, "STALL_WINDOW", old[1]))
+        dl = self.dm.add(self.url, folder=self.out, connections=8)
+        self.wait(dl, {Status.COMPLETE, Status.ERROR})
+        self.check_file(dl)
+        self.assertIsNone(dl.connection_note)
+        self.assertIsNone(engine.learned_limit("127.0.0.1"))
+
+    def test_server_that_starves_extra_connections(self):
+        self._limited("trickle")
+
+    def test_server_that_refuses_extra_connections(self):
+        self._limited("503")
 
     def test_dynamic_segmentation_splits(self):
         Handler.slow_first = True

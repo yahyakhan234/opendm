@@ -844,7 +844,10 @@ class App(tk.Tk):
             bits.append(human_size(d.downloaded))
         if d.status == Status.DOWNLOADING:
             bits.append(f"{human_size(d.speed)}/s")
-            bits.append(f"{d.active_connections} connections")
+            n = d.active_connections
+            conn = f"{n} connection{'s' if n != 1 else ''}"
+            note = getattr(d, "connection_note", None)
+            bits.append(f"{conn} ({note})" if note else conn)
             if d.eta:
                 bits.append(f"{human_time(d.eta)} left")
         if d.total is not None and d.status != Status.COMPLETE and d.kind != "hls":

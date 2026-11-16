@@ -24,6 +24,7 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -43,6 +44,49 @@ USER_AGENT = (
 # Some servers' bot protection hangs up on a client that calls itself Chrome but doesn't
 # connect like Chrome does. If the first request is refused, we retry under our own name.
 PLAIN_USER_AGENT = f"OpenDM/{__version__}"
+
+# Some servers only allow a few connections per user and starve the rest (they get a few
+# hundred bytes a second, or are refused). A watchdog spots those, closes them, and lowers
+# the download's connection count to what the server actually serves.
+STALL_GRACE = 8.0        # seconds a new connection gets before it's judged
+STALL_WINDOW = 8.0       # judged on what it received over this many seconds
+STALL_MIN_RATE = 8 * 1024
+HEALTHY_RATE = 256 * 1024  # only judge when another connection is clearly doing well
+_host_limits: dict[str, int] = {}  # learned per server, for the rest of the session
+_host_lock = threading.Lock()
+
+
+def learned_limit(host: str | None) -> int | None:
+    with _host_lock:
+        return _host_limits.get(host or "")
+
+
+class _Starved(Exception):
+    """A connection the server isn't really serving; its part goes to another connection."""
+
+
+class _Conn:
+    __slots__ = ("seg", "resp", "opened", "samples", "killed")
+
+    def __init__(self, seg, resp):
+        self.seg = seg
+        self.resp = resp
+        self.opened = time.monotonic()
+        self.samples = collections.deque([(self.opened, seg.pos)])
+        self.killed = False
+
+    def rate(self, now: float) -> float:
+        while len(self.samples) > 2 and self.samples[1][0] <= now - STALL_WINDOW:
+            self.samples.popleft()
+        t0, p0 = self.samples[0]
+        return (self.seg.pos - p0) / max(0.001, now - t0)
+
+    def close(self) -> None:
+        try:  # unblock a read that's waiting for data that isn't coming
+            self.resp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+
 
 NETWORK_ERRORS = (
     urllib.error.URLError,
@@ -175,6 +219,16 @@ class Download:
         self._fatal: BaseException | None = None
         self._samples: collections.deque = collections.deque(maxlen=12)
         self.speed = 0.0
+        self._limit = self.connections   # may drop if the server limits connections
+        self._conns: set[_Conn] = set()
+        self._peak_rate = 0.0    # best speed one connection has reached
+        self._best_served = 0    # most connections the server has served well at the same time
+        self._workers: list[threading.Thread] = []
+        self._last_change = 0.0  # when the limit last moved (monotonic)
+        self._grow_failed = False
+        self._grew_at = 0.0
+        self._last_starved = 0.0  # when the watchdog last closed a starved connection
+        self.connection_note: str | None = None  # e.g. "server allows 2 connections"
 
     # ------------------------------------------------------------------ info
     @property
@@ -354,6 +408,8 @@ class Download:
 
     def _next_segment(self) -> Segment | None:
         with self._lock:
+            if sum(1 for s in self.segments if s.active) >= self._limit:
+                return None  # the server only serves this many: this connection retires
             for seg in self.segments:
                 if not seg.active and not seg.complete:
                     seg.active = True
@@ -395,23 +451,22 @@ class Download:
             code = getattr(r, "status", None) or r.getcode() or 200
             if self.resumable and code != 206:
                 raise IOError(f"Server ignored range request (HTTP {code})")
-            with open(path, mode) as f:
-                while not self._stop.is_set():
-                    data = r.read(CHUNK)
-                    if not data:
-                        break
-                    if self.limiter:
-                        self.limiter.consume(len(data), self._stop)
-                    with self._lock:
-                        if seg.end is not None:
-                            data = data[: max(0, seg.end - seg.pos + 1)]
-                        seg.pos += len(data)
-                        finished = seg.complete
-                    f.write(data)
-                    if finished:
-                        return
-                else:
-                    return  # paused
+            conn = _Conn(seg, r)
+            with self._lock:
+                self._conns.add(conn)
+            try:
+                self._read_into(r, seg, path, mode)
+            except Exception:
+                if conn.killed:
+                    raise _Starved() from None
+                raise
+            finally:
+                with self._lock:
+                    self._conns.discard(conn)
+            if conn.killed:
+                raise _Starved()
+            if self._stop.is_set() and not seg.complete:
+                return  # paused
         # Server closed the connection.
         if seg.end is None:
             with self._lock:
@@ -420,6 +475,23 @@ class Download:
                 self.total = seg.pos
         elif not seg.complete:
             raise ConnectionError("Connection closed before segment finished")
+
+    def _read_into(self, r, seg: Segment, path: str, mode: str) -> None:
+        with open(path, mode) as f:
+            while not self._stop.is_set():
+                data = r.read(CHUNK)
+                if not data:
+                    break
+                if self.limiter:
+                    self.limiter.consume(len(data), self._stop)
+                with self._lock:
+                    if seg.end is not None:
+                        data = data[: max(0, seg.end - seg.pos + 1)]
+                    seg.pos += len(data)
+                    finished = seg.complete
+                f.write(data)
+                if finished:
+                    return
 
     def _worker(self) -> None:
         try:
@@ -433,9 +505,24 @@ class Download:
                         before = seg.pos
                         try:
                             self._fetch(seg)
-                        except urllib.error.HTTPError as e:
-                            if e.code in (401, 403, 404, 410, 416):
+                        except _Starved:
+                            if self._retire(seg):
+                                return  # its part is picked up by a connection the server does serve
+                            self._stop.wait(0.2)  # one of the few the server serves: reconnect
+                            continue
+                        except (urllib.error.HTTPError, ConnectionRefusedError, ConnectionResetError,
+                                http.client.RemoteDisconnected) as e:
+                            refused = not isinstance(e, urllib.error.HTTPError) or e.code in (429, 503)
+                            if refused and seg.pos == before and self._others_open():
+                                # Turned away while other connections work: too many connections.
+                                self._lower_limit(max(self.active_connections - 1, self._best_served))
+                                if self._retire(seg):
+                                    return
+                            if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403, 404, 410, 416):
                                 raise
+                            if not isinstance(e, urllib.error.HTTPError):
+                                if seg.pos > before:
+                                    attempts = 0
                             attempts += 1
                             if attempts > MAX_RETRIES:
                                 raise
@@ -453,6 +540,98 @@ class Download:
         except BaseException as e:  # noqa: BLE001 - report any failure to the UI
             self._fatal = e
             self._stop.set()
+
+    # ------------------------------------------------------- connection limit
+    def _others_open(self) -> bool:
+        with self._lock:
+            return any(not c.killed for c in self._conns)
+
+    def _retire(self, seg: Segment) -> bool:
+        """Give up this connection if there are more than the limit; never drop below it."""
+        with self._lock:
+            if sum(1 for s in self.segments if s.active) > self._limit:
+                seg.active = False
+                return True
+            return False
+
+    def _lower_limit(self, n: int) -> None:
+        with self._lock:
+            n = max(1, min(self._limit, n))
+            if n >= self._limit:
+                return
+            if self._grew_at and time.monotonic() - self._grew_at < 3 * STALL_WINDOW:
+                self._grow_failed = True  # we just tried one more and it didn't work out
+            self._limit = n
+            self._last_change = time.monotonic()
+            self.connection_note = f"server allows {n} connection{'s' if n != 1 else ''}"
+        self._remember_limit()
+
+    def _remember_limit(self) -> None:
+        host = urllib.parse.urlparse(self.final_url).hostname or ""
+        with _host_lock:
+            _host_limits[host] = self._limit
+
+    def _spawn_worker(self) -> None:
+        w = threading.Thread(target=self._worker, daemon=True, name=f"dl-{self.id[:6]}-{len(self._workers)}")
+        self._workers.append(w)
+        w.start()
+
+    def _maybe_grow(self, conns, rates, now) -> None:
+        """After a while with every connection served well, try one more (the limit we learned
+        may have been too low, e.g. because a slot was still busy when we counted)."""
+        if (self._grow_failed or self._limit >= self.connections or len(conns) < self._limit
+                or now - self._last_change < 2 * STALL_WINDOW
+                or any(rates[c] < HEALTHY_RATE for c in conns)):
+            return
+        with self._lock:
+            if sum(s.remaining for s in self.segments if not s.complete) < 4 * MIN_SPLIT:
+                return  # almost done: not worth it
+            self._limit += 1
+            self._last_change = self._grew_at = now
+            self._last_starved = 0.0
+            n = self._limit
+            self.connection_note = f"server allows {n} connection{'s' if n != 1 else ''}"
+        self._remember_limit()
+        self._spawn_worker()
+
+    def _watch(self, done: threading.Event) -> None:
+        """Close connections the server is starving, and lower the limit to what it serves."""
+        while not done.wait(0.5):
+            if self.limiter and self.limiter.rate > 0:
+                continue  # a speed limit slows connections on purpose
+            now = time.monotonic()
+            with self._lock:
+                conns = [c for c in self._conns if not c.killed]
+                for c in conns:
+                    c.samples.append((now, c.seg.pos))
+                rates = {c: c.rate(now) for c in conns}
+            if not conns:
+                continue
+            served = [c for c in conns if rates[c] >= HEALTHY_RATE]
+            self._best_served = max(self._best_served, len(served))
+            self._peak_rate = max(self._peak_rate, max(rates.values()))
+            if self._peak_rate < HEALTHY_RATE:
+                continue  # slow link: nothing to compare against
+            # Starved: open a while, yet getting almost nothing compared with what this server
+            # gives a connection it actually serves (now or earlier in this download).
+            starved = [c for c in conns if now - c.opened >= STALL_GRACE
+                       and rates[c] < max(STALL_MIN_RATE, self._peak_rate * 0.03)]
+            if not starved:
+                self._maybe_grow(conns, rates, now)
+                continue
+            # One starved connection on its own is often just timing (it opened a moment
+            # before the server freed the slot of one that finished), so it only reconnects.
+            # Several at once, or the same thing again soon after, means a real limit.
+            repeat = self._last_starved and now - self._last_starved < 3 * STALL_WINDOW
+            probation = self._grew_at and now - self._grew_at < 3 * STALL_WINDOW  # just tried one more
+            if len(starved) > 1 or repeat or probation:
+                self._lower_limit(max(len(conns) - len(starved), self._best_served, 1))
+                self._last_starved = 0.0  # start counting afresh at the new limit
+            else:
+                self._last_starved = now
+            for c in starved:
+                c.killed = True
+                c.close()
 
     def _assemble(self) -> None:
         self.status = Status.ASSEMBLING
@@ -495,14 +674,25 @@ class Download:
             self._sync_from_disk()
             self.status = Status.DOWNLOADING
 
-            workers = [
-                threading.Thread(target=self._worker, daemon=True, name=f"dl-{self.id[:6]}-{i}")
-                for i in range(self.connections if self.resumable else 1)
-            ]
-            for w in workers:
-                w.start()
-            for w in workers:
-                w.join()
+            self._limit = self.connections
+            learned = learned_limit(urllib.parse.urlparse(self.final_url).hostname)
+            if learned and learned < self._limit:
+                self._limit = learned
+                self.connection_note = f"server allows {learned} connection{'s' if learned != 1 else ''}"
+            self._workers = []
+            self._last_change = time.monotonic() if learned else 0.0
+            for _ in range(self._limit if self.resumable else 1):
+                self._spawn_worker()
+            done = threading.Event()
+            if self.resumable and self.connections > 1:
+                threading.Thread(target=self._watch, args=(done,), daemon=True,
+                                 name=f"dl-{self.id[:6]}-watch").start()
+            while True:  # the watchdog may add a worker, so keep looking
+                alive = [w for w in list(self._workers) if w.is_alive()]
+                if not alive:
+                    break
+                alive[0].join(0.5)
+            done.set()
 
             if self._fatal is not None:
                 raise self._fatal
