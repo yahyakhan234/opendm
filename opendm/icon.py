@@ -125,6 +125,43 @@ def ico_bytes(sizes=(16, 24, 32, 48, 64, 128, 256)) -> bytes:
     return header + entries + b"".join(images)
 
 
+# Drawing the icon pixel by pixel takes about half a second, so built copies of OpenDM ship
+# the finished files (see tools/build_exe.py) and only a source checkout draws them.
+TRAY_SIZES = (16, 20, 24, 32, 48, 64)
+
+
+def _shipped(name: str) -> bytes | None:
+    import sys
+
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        return None
+    try:
+        with open(os.path.join(base, "assets", name), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def window_png() -> str:
+    """64 px PNG (base64) for the window icon."""
+    data = _shipped("window64.png")
+    return base64.b64encode(data).decode() if data else png_base64(64)
+
+
+def tray_ico() -> bytes:
+    """Multi-size .ico for the tray icon."""
+    return _shipped("tray.ico") or ico_bytes(TRAY_SIZES)
+
+
+def write_assets(folder: str) -> None:
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "window64.png"), "wb") as f:
+        f.write(png_bytes(64))
+    with open(os.path.join(folder, "tray.ico"), "wb") as f:
+        f.write(ico_bytes(TRAY_SIZES))
+
+
 if __name__ == "__main__":
     out = os.path.join(os.path.dirname(__file__), "..", "extension", "icons")
     os.makedirs(out, exist_ok=True)

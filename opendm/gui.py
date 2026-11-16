@@ -18,7 +18,7 @@ from .ytdlp import find_ytdlp, update_managed_ytdlp
 from . import bundle
 from .ytdlp import probe as ytdlp_probe
 from . import tray
-from .icon import ico_bytes, png_base64
+from .icon import tray_ico, window_png
 from .manager import DownloadManager
 from .server import ApiServer
 from .util import CATEGORIES, category_for, human_size, human_time, is_url
@@ -422,7 +422,7 @@ class App(tk.Tk):
         self.geometry("1100x680")
         self.minsize(820, 480)
         try:
-            self._icon = tk.PhotoImage(data=png_base64(64))
+            self._icon = tk.PhotoImage(data=window_png())
             self.iconphoto(True, self._icon)
         except tk.TclError:
             pass
@@ -444,7 +444,7 @@ class App(tk.Tk):
             try:
                 ico = os.path.join(manager.root, "opendm.ico")
                 with open(ico, "wb") as f:
-                    f.write(ico_bytes((16, 20, 24, 32, 48, 64)))
+                    f.write(tray_ico())
                 self.tray = tray.TrayIcon(ico, APP_NAME, self.tray_events.put)
                 if not self.tray.start():
                     self.tray = None
@@ -477,9 +477,9 @@ class App(tk.Tk):
         ttk.Button(bar, text="＋  Add URL", style="ToolAccent.TButton", command=self.add_dialog).pack(side="left")
         ttk.Frame(bar, width=10, style="Panel.TFrame").pack(side="left")
         self.btn_resume = ttk.Button(bar, text="▶  Resume", style="Tool.TButton", command=self.resume_selected)
-        self.btn_pause = ttk.Button(bar, text="⏸  Pause", style="Tool.TButton", command=self.pause_selected)
+        self.btn_pause = ttk.Button(bar, text="❚❚  Pause", style="Tool.TButton", command=self.pause_selected)
         self.btn_delete = ttk.Button(bar, text="✕  Delete", style="Tool.TButton", command=self.delete_selected)
-        self.btn_folder = ttk.Button(bar, text="📂  Open folder", style="Tool.TButton", command=self.open_folder)
+        self.btn_folder = ttk.Button(bar, text="🗀  Open folder", style="Tool.TButton", command=self.open_folder)
         for w in (self.btn_resume, self.btn_pause, self.btn_delete, self.btn_folder):
             w.pack(side="left", padx=2)
         ttk.Button(bar, text="⚙  Settings", style="Tool.TButton",
@@ -968,14 +968,21 @@ class App(tk.Tk):
         self.destroy()
 
 
-def run(initial_urls: list[str] | None = None, manager: DownloadManager | None = None) -> None:
+def run(initial_urls: list[str] | None = None, manager: DownloadManager | None = None,
+        start_hidden: bool = False) -> None:
+    mutex = None
     if sys.platform == "win32":
         try:
             import ctypes
 
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("OpenDM.App")
+            # Lets the installer see that OpenDM is running and ask to close it before updating.
+            mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "OpenDM-Running")
         except Exception:
             pass
     app = App(manager or DownloadManager(), initial_urls)
+    if start_hidden and app.tray is not None:
+        app.withdraw()
     app.mainloop()
+    del mutex  # released when the process exits

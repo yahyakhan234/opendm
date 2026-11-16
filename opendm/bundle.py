@@ -5,6 +5,9 @@ once to <data folder>/tools, where it stays (and where yt-dlp can update itself)
 packed as <name>.zip is extracted there; <name>.exe is copied as is. Each has a
 <name>.version file next to it, and a newer bundled version replaces an older installed one.
 
+The installed version (a normal folder, not a single exe) doesn't need this for tools
+that never change themselves: ffmpeg is used straight from the install folder.
+
 When running from source there is nothing bundled and these functions just report what's
 already in the tools folder.
 """
@@ -22,6 +25,15 @@ from .util import data_dir
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
+
+
+# Tools that never modify themselves, so they can run from a fixed install folder.
+IN_PLACE = {"ffmpeg"}
+
+
+def _single_file_exe() -> bool:
+    """True for the portable OpenDM.exe, which unpacks itself to a new temp folder each launch."""
+    return os.path.basename(getattr(sys, "_MEIPASS", "")).startswith("_MEI")
 
 
 def tools_dir() -> str:
@@ -87,6 +99,8 @@ def install(name: str) -> str | None:
     """Path to OpenDM's own copy of a tool, unpacking the bundled one first if needed."""
     dest = os.path.join(tools_dir(), name + ".exe")
     found = bundled(name)
+    if found and name in IN_PLACE and found[0].endswith(".exe") and not _single_file_exe():
+        return found[0]  # installed version: use it where it is
     with _lock(name):
         if found:
             src, version = found
@@ -106,4 +120,9 @@ def install(name: str) -> str | None:
 
 
 def is_managed(path: str | None) -> bool:
-    return bool(path) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(tools_dir())
+    """True for a tool that came with OpenDM (unpacked to the data folder, or in the install folder)."""
+    if not path:
+        return False
+    folder = os.path.dirname(os.path.abspath(path))
+    shipped = os.path.join(getattr(sys, "_MEIPASS", ""), "tools") if getattr(sys, "_MEIPASS", None) else None
+    return folder == os.path.abspath(tools_dir()) or (shipped is not None and folder == os.path.abspath(shipped))

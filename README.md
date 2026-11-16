@@ -35,16 +35,23 @@ a crash or a reboot, and catches downloads straight from your browser.
 
 ## Install & run
 
-### Easiest: the exe
+### Easiest: the installer
 
-Download **`OpenDM.exe`** from the [latest release](https://github.com/yahyakhan234/opendm/releases/latest)
-and double-click it. Nothing else to install: Python, yt-dlp and ffmpeg are all inside.
+Download **`OpenDM-Setup-<version>.exe`** from the [latest release](https://github.com/yahyakhan234/opendm/releases/latest)
+and run it. It installs for your user only (no admin prompt), adds a Start-menu shortcut, can start
+OpenDM with Windows (it waits quietly in the tray), and has a normal uninstaller. Nothing else to
+install: Python, yt-dlp and ffmpeg are all included. The installed version starts in about a second.
+
+### Portable: the single exe
+
+Prefer not to install? Download **`OpenDM.exe`** and double-click it. Same app in one file.
 Settings, the download list and the unpacked tools are kept in `%LOCALAPPDATA%\OpenDM`, so you can
 move the exe anywhere.
 
 The exe isn't code-signed, so the first time Windows may show "Windows protected your PC".
-Click **More info** → **Run anyway**. It takes about 5 seconds to start because it unpacks itself first.
-The very first launch also unpacks yt-dlp and ffmpeg (about 190 MB) into the data folder.
+Click **More info** → **Run anyway**. The portable exe takes about 2 seconds to start because it
+unpacks itself first, and its very first launch also unpacks yt-dlp and ffmpeg (about 190 MB) into
+the data folder.
 
 ### From source
 
@@ -107,15 +114,20 @@ This writes two zips to `dist/`:
   YouTube downloading, because Chrome Web Store policy rejects YouTube downloaders. Chrome users can
   still paste a YouTube link into the app's Add URL.
 
-### Building the exe
+### Building the exe and the installer
 
 ```bash
 python -m venv .venv
 .venv\Scripts\pip install pyinstaller
 .venv\Scripts\python tools/build_exe.py
+.venv\Scripts\python tools/build_exe.py --installer
 ```
 
-This writes `dist/OpenDM.exe` (about 80 MB) with yt-dlp and ffmpeg packed inside, taken from the copies
+The first writes the portable `dist/OpenDM.exe`. The second writes `dist/OpenDM-Setup-<version>.exe`
+and needs [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`);
+the installer script is `installer/opendm.iss`.
+
+Both include yt-dlp and ffmpeg, taken from the copies
 installed on your PC. `winget install yt-dlp` installs both (yt-dlp's own ffmpeg build is preferred).
 Use `--ytdlp PATH` / `--ffmpeg PATH` to pick other copies, or `--no-ytdlp` / `--no-ffmpeg` to leave them out.
 

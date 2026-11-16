@@ -1,8 +1,12 @@
-"""Build a standalone OpenDM.exe (no Python needed to run it).
+"""Build OpenDM for Windows (no Python needed to run it).
 
     python -m venv .venv
     .venv\Scripts\pip install pyinstaller
-    .venv\Scripts\python tools/build_exe.py
+    .venv\Scripts\python tools/build_exe.py               -> dist/OpenDM.exe (portable, one file)
+    .venv\Scripts\python tools/build_exe.py --installer   -> dist/OpenDM-Setup-<version>.exe
+
+The installer needs Inno Setup 6 (winget install JRSoftware.InnoSetup). The installed app
+starts faster than the portable exe because it doesn't unpack itself on every launch.
 
 Writes dist/OpenDM.exe with yt-dlp and ffmpeg packed inside, so the person running it
 needs nothing else. The copies installed on this PC are used:
@@ -29,7 +33,7 @@ BUILD = os.path.join(ROOT, "build")
 sys.path.insert(0, ROOT)
 
 from opendm import __version__  # noqa: E402
-from opendm.icon import ico_bytes  # noqa: E402
+from opendm.icon import ico_bytes, write_assets  # noqa: E402
 from opendm.ytdlp import find_ytdlp  # noqa: E402
 
 
@@ -93,8 +97,12 @@ Its license (GPL) is in ffmpeg-LICENSE.txt next to this file.
 """
 
 
-def stage_ffmpeg(path: str | None) -> list[str]:
-    """Pack ffmpeg.exe + its license into build/tools/ffmpeg.zip; return PyInstaller arguments."""
+def stage_ffmpeg(path: str | None, packed: bool = True) -> list[str]:
+    """Stage ffmpeg.exe + its license in build/tools; return PyInstaller arguments.
+
+    packed=True (portable exe): one LZMA zip, unpacked once at runtime.
+    packed=False (installer): the plain files, used straight from the install folder.
+    """
     exe = path or _installed_ffmpeg()
     if not exe or not os.path.isfile(exe):
         raise SystemExit("ffmpeg.exe not found. Install it (winget install yt-dlp.FFmpeg), "
@@ -116,30 +124,63 @@ def stage_ffmpeg(path: str | None) -> list[str]:
         raise SystemExit(f"No LICENSE file found next to {exe}; it must ship with ffmpeg.")
     tools = os.path.join(BUILD, "tools")
     os.makedirs(tools, exist_ok=True)
+    with open(os.path.join(tools, "ffmpeg.version"), "w", encoding="utf-8") as f:
+        f.write(version)
+    if not packed:
+        print(f"bundling ffmpeg {raw} from {exe}")
+        shutil.copyfile(exe, os.path.join(tools, "ffmpeg.exe"))
+        shutil.copyfile(licence, os.path.join(tools, "ffmpeg-LICENSE.txt"))
+        with open(os.path.join(tools, "ffmpeg-SOURCE.txt"), "w", encoding="utf-8") as f:
+            f.write(FFMPEG_SOURCE_NOTE.format(version=raw))
+        args = ["--add-binary", f"{os.path.join(tools, 'ffmpeg.exe')}{os.pathsep}tools"]
+        for name in ("ffmpeg.version", "ffmpeg-LICENSE.txt", "ffmpeg-SOURCE.txt"):
+            args += ["--add-data", f"{os.path.join(tools, name)}{os.pathsep}tools"]
+        return args
     zpath = os.path.join(tools, "ffmpeg.zip")
     print(f"bundling ffmpeg {raw} from {exe} (compressing, takes a minute)")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_LZMA) as z:
         z.write(exe, "ffmpeg.exe")
         z.write(licence, "LICENSE.txt")
         z.writestr("SOURCE.txt", FFMPEG_SOURCE_NOTE.format(version=raw))
-    with open(os.path.join(tools, "ffmpeg.version"), "w", encoding="utf-8") as f:
-        f.write(version)
     print(f"  ffmpeg.zip: {os.path.getsize(zpath) / 1e6:.0f} MB")
     return ["--add-data", f"{zpath}{os.pathsep}tools",
             "--add-data", f"{os.path.join(tools, 'ffmpeg.version')}{os.pathsep}tools"]
 
 
+def find_iscc(given: str | None) -> str:
+    cands = [given] if given else []
+    cands += [shutil.which("iscc") or ""]
+    for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("ProgramFiles(x86)", ""),
+                 os.environ.get("ProgramFiles", "")):
+        cands.append(os.path.join(base, "Programs", "Inno Setup 6", "ISCC.exe"))
+        cands.append(os.path.join(base, "Inno Setup 6", "ISCC.exe"))
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    raise SystemExit("Inno Setup not found. Install it with:  winget install JRSoftware.InnoSetup  "
+                     "(or pass --iscc PATH)")
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build dist/OpenDM.exe")
+    ap = argparse.ArgumentParser(description="Build dist/OpenDM.exe, or the installer with --installer")
+    ap.add_argument("--installer", action="store_true", help="build dist/OpenDM-Setup-<version>.exe")
+    ap.add_argument("--iscc", help="path to Inno Setup's ISCC.exe")
+    ap.add_argument("--folder", action="store_true",
+                    help="only build the installer's app folder (dist/OpenDM), without Inno Setup")
     ap.add_argument("--ytdlp", help="yt-dlp.exe to bundle (default: the installed one)")
     ap.add_argument("--no-ytdlp", action="store_true", help="don't bundle yt-dlp")
     ap.add_argument("--ffmpeg", help="ffmpeg.exe to bundle (default: the installed one)")
     ap.add_argument("--no-ffmpeg", action="store_true", help="don't bundle ffmpeg")
     opts = ap.parse_args()
+    folder = opts.installer or opts.folder
+    iscc = find_iscc(opts.iscc) if opts.installer else None  # fail early, before the slow part
     os.makedirs(BUILD, exist_ok=True)
     shutil.rmtree(os.path.join(BUILD, "tools"), ignore_errors=True)
     extra = [] if opts.no_ytdlp else stage_ytdlp(opts.ytdlp)
-    extra += [] if opts.no_ffmpeg else stage_ffmpeg(opts.ffmpeg)
+    extra += [] if opts.no_ffmpeg else stage_ffmpeg(opts.ffmpeg, packed=not folder)
+    assets = os.path.join(BUILD, "assets")
+    write_assets(assets)  # pre-drawn icons, so the app doesn't draw them on every launch
+    extra += ["--add-data", f"{assets}{os.pathsep}assets"]
     ico = os.path.join(BUILD, "opendm.ico")
     with open(ico, "wb") as f:
         f.write(ico_bytes())
@@ -147,7 +188,7 @@ def main() -> None:
     version_file(ver)
     subprocess.check_call([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
-        "--onefile", "--windowed", "--name", "OpenDM",
+        "--onedir" if folder else "--onefile", "--windowed", "--name", "OpenDM",
         "--icon", ico, "--version-file", ver, *extra,
         "--distpath", os.path.join(ROOT, "dist"),
         "--workpath", os.path.join(BUILD, "pyinstaller"),
@@ -155,7 +196,15 @@ def main() -> None:
         os.path.join(ROOT, "OpenDM.pyw"),
     ], cwd=ROOT)
     shutil.rmtree(os.path.join(BUILD, "pyinstaller"), ignore_errors=True)
-    print("built", os.path.join(ROOT, "dist", "OpenDM.exe"))
+    if not folder:
+        print("built", os.path.join(ROOT, "dist", "OpenDM.exe"))
+        return
+    if not opts.installer:
+        print("built", os.path.join(ROOT, "dist", "OpenDM"))
+        return
+    subprocess.check_call([iscc, "/Q", f"/DAppVersion={__version__}", f"/DRoot={ROOT}",
+                           os.path.join(ROOT, "installer", "opendm.iss")])
+    print("built", os.path.join(ROOT, "dist", f"OpenDM-Setup-{__version__}.exe"))
 
 
 if __name__ == "__main__":

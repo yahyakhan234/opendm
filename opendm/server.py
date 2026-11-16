@@ -8,6 +8,7 @@ preflight, and we never answer preflights, so a random website can't queue downl
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -118,8 +119,23 @@ class ApiServer:
         self.httpd.shutdown()
 
 
+def _port_in_use(port: int) -> bool:
+    """Instant check. Connecting to a closed port on Windows takes ~2 s to fail (it retries),
+    which used to delay every launch; binding to a free port succeeds immediately."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
 def send_to_running_instance(port: int, urls: list[str]) -> bool:
     """If OpenDM is already running, hand it the URLs and return True."""
+    if not _port_in_use(port):
+        return False
     try:
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/add",
@@ -129,6 +145,18 @@ def send_to_running_instance(port: int, urls: list[str]) -> bool:
         )
         if not urls:
             req.full_url = f"http://127.0.0.1:{port}/show"  # just bring the window forward
+        with urllib.request.urlopen(req, timeout=2) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def instance_running(port: int) -> bool:
+    """True if an OpenDM is already answering on this port."""
+    if not _port_in_use(port):
+        return False
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/ping", headers={HEADER: "cli"})
         with urllib.request.urlopen(req, timeout=2) as r:
             return r.status == 200
     except (urllib.error.URLError, OSError, ValueError):
