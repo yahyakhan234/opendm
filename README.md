@@ -4,6 +4,8 @@ A free, open-source download manager for Windows (and anywhere Python runs).
 It speeds up downloads by using several connections at once, resumes after a pause,
 a crash or a reboot, and catches downloads straight from your browser.
 
+![OpenDM downloading a 1 GB file over 8 connections](docs/opendm-demo.gif)
+
 **No dependencies.** Pure Python standard library + Tkinter, so it runs anywhere Python 3.10+ does.
 
 ## Features
