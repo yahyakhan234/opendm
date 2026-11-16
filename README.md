@@ -23,7 +23,7 @@ a crash or a reboot, and catches downloads straight from your browser.
   (1080p, 720p…) and OpenDM downloads it over several connections, decrypting standard
   AES-128 streams and merging video + audio into one `.mp4`. Works with HLS (`.m3u8`) streams and
   plain video files; you can also paste an `.m3u8` link into **Add URL**.
-- **YouTube** (needs [yt-dlp](https://github.com/yt-dlp/yt-dlp)). The same button lists YouTube's
+- **YouTube** (through [yt-dlp](https://github.com/yt-dlp/yt-dlp), built into the exe; video also needs ffmpeg). The same button lists YouTube's
   real qualities with sizes, plus **Audio only**. You can also paste a YouTube link into **Add URL**.
 - **Right-click menu.** "Download with OpenDM" on any link, image or video, plus
   "Download all links on this page".
@@ -113,7 +113,8 @@ python -m venv .venv
 .venv\Scripts\python tools/build_exe.py
 ```
 
-This writes `dist/OpenDM.exe`. ffmpeg and yt-dlp aren't bundled; the exe finds them if they're installed.
+This writes `dist/OpenDM.exe` with the yt-dlp installed on your PC packed inside (`--no-ytdlp` leaves it out).
+ffmpeg isn't bundled because it's large (around 170 MB); the exe uses it if it's installed.
 
 ### Downloading videos
 
@@ -123,11 +124,14 @@ The extension icon shows how many videos it found on the page, and the popup lis
 - **ffmpeg** (optional, recommended) turns streams into normal `.mp4` files and merges separate
   audio tracks. Install it with `winget install ffmpeg`. OpenDM finds it automatically, or you can
   set its location in Settings. Without it, videos are saved as `.ts`, which VLC and most players handle.
-- **YouTube** needs yt-dlp: `winget install yt-dlp`. OpenDM finds it automatically (or set its
-  location in Settings) and runs it in the background, showing progress, pause and resume in the
+- **YouTube** uses yt-dlp. `OpenDM.exe` comes with it and lets it update itself once a day, since
+  YouTube changes often and old versions stop working. Running from source, install it with
+  `winget install yt-dlp`. **YouTube video also needs ffmpeg**: YouTube now sends video and sound as
+  separate streams, and ffmpeg joins them. Without ffmpeg only **Audio only** is offered.
+  OpenDM runs yt-dlp in the background, showing progress, pause and resume in the
   OpenDM window. Files are H.264 + AAC `.mp4` up to 1080p (VP9/AV1 above that, which is all YouTube
-  offers there), or `.m4a` for audio only. YouTube changes often; if downloads start failing, run
-  `winget upgrade yt-dlp`. Downloading from YouTube is against YouTube's terms of service, so it's
+  offers there), or `.m4a` for audio only. If you installed yt-dlp yourself and downloads start
+  failing, run `winget upgrade yt-dlp`. Downloading from YouTube is against YouTube's terms of service, so it's
   your call what you save.
 - **Not supported:** DRM-protected video (Netflix, Disney+, Prime Video, Spotify and similar) is
   shown greyed out and is never downloaded. Live streams aren't supported.
