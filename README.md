@@ -34,6 +34,17 @@ a crash or a reboot, and catches downloads straight from your browser.
 
 ## Install & run
 
+### Easiest: the exe
+
+Download **`OpenDM.exe`** from the [latest release](https://github.com/yahyakhan234/opendm/releases/latest)
+and double-click it. No Python or install needed. Settings and the download list are kept in
+`%LOCALAPPDATA%\OpenDM`, so you can move the exe anywhere.
+
+The exe isn't code-signed, so the first time Windows may show "Windows protected your PC".
+Click **More info** → **Run anyway**. It takes a few seconds to start because it unpacks itself first.
+
+### From source
+
 You need [Python 3.10+](https://www.python.org/downloads/) (check "Add to PATH" and keep "tcl/tk" ticked).
 
 ```bash
@@ -92,6 +103,16 @@ This writes two zips to `dist/`:
 - `opendm-chrome-<version>.zip` for the Chrome Web Store and Edge Add-ons. This build leaves out
   YouTube downloading, because Chrome Web Store policy rejects YouTube downloaders. Chrome users can
   still paste a YouTube link into the app's Add URL.
+
+### Building the exe
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip install pyinstaller
+.venv\Scripts\python tools/build_exe.py
+```
+
+This writes `dist/OpenDM.exe`. ffmpeg and yt-dlp aren't bundled; the exe finds them if they're installed.
 
 ### Downloading videos
 
@@ -157,7 +178,7 @@ opendm/
   icon.py      app icon, drawn in code (python -m opendm.icon regenerates extension icons)
 extension/     browser extension for Firefox + Chromium (one Manifest V3 codebase)
                background.js: download catching + video detection; content.js: the video button
-tools/         package_extension.py builds the store-ready zips
+tools/         package_extension.py builds the store-ready zips; build_exe.py builds OpenDM.exe
 tests/         end-to-end tests against a local range-capable HTTP server
 ```
 

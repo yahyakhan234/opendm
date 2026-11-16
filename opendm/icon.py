@@ -112,6 +112,19 @@ def png_base64(size: int) -> str:
     return base64.b64encode(png_bytes(size)).decode()
 
 
+def ico_bytes(sizes=(16, 24, 32, 48, 64, 128, 256)) -> bytes:
+    """A Windows .ico holding one PNG per size (supported since Windows Vista)."""
+    images = [png_bytes(s) for s in sizes]
+    header = struct.pack("<HHH", 0, 1, len(images))
+    offset = 6 + 16 * len(images)
+    entries = b""
+    for s, data in zip(sizes, images):
+        dim = 0 if s >= 256 else s  # 0 means 256 in the ICO format
+        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    return header + entries + b"".join(images)
+
+
 if __name__ == "__main__":
     out = os.path.join(os.path.dirname(__file__), "..", "extension", "icons")
     os.makedirs(out, exist_ok=True)
