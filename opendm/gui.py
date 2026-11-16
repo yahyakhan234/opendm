@@ -6,6 +6,7 @@ import os
 import queue
 import subprocess
 import sys
+import threading
 import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, ttk
@@ -13,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 from . import APP_NAME, __version__
 from .engine import Status
 from .hls import find_ffmpeg
-from .ytdlp import find_ytdlp
+from .ytdlp import find_ytdlp, managed_ytdlp, update_managed_ytdlp
 from .ytdlp import probe as ytdlp_probe
 from . import tray
 from .icon import ico_bytes, png_base64
@@ -304,7 +305,10 @@ class SettingsDialog(Dialog):
         self.ytdlp.insert(0, s.get("ytdlp_path") or "")
         self.ytdlp.grid(row=11, column=1, sticky="ew", padx=10, pady=(10, 4))
         ttk.Button(b, text="Browse…", command=self._browse_ytdlp).grid(row=11, column=2, pady=(10, 4))
-        msg = f"Found: {yt}" if yt else "Not found. Install it with:  winget install yt-dlp"
+        if yt and yt == managed_ytdlp():
+            msg = "Built in (comes with OpenDM and updates itself daily)"
+        else:
+            msg = f"Found: {yt}" if yt else "Not found. Install it with:  winget install yt-dlp"
         ttk.Label(b, text=msg if len(msg) < 90 else "Found: …" + msg[-80:], style="MutedBg.TLabel").grid(
             row=12, column=1, columnspan=2, sticky="w", padx=10)
 
@@ -425,7 +429,7 @@ class App(tk.Tk):
         self.server = None
         try:
             self.server = ApiServer(int(manager.settings["port"]), lambda p: self.events.put(("api", p)),
-                                    lambda url: ytdlp_probe(url, find_ytdlp(manager.settings.get("ytdlp_path") or None)))
+                                    self._probe)
             self.server.start()
         except OSError:
             self.status_msg.set(f"Browser integration off: port {manager.settings['port']} is busy")
@@ -443,6 +447,8 @@ class App(tk.Tk):
             except OSError:
                 self.tray = None
         self.bind("<Unmap>", self._on_unmap)
+        # The yt-dlp that ships with OpenDM.exe updates itself once a day; YouTube breaks old versions.
+        threading.Thread(target=update_managed_ytdlp, name="yt-dlp-update", daemon=True).start()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Control-n>", lambda e: self.add_dialog())
@@ -873,6 +879,11 @@ class App(tk.Tk):
             self.hide_to_tray()
         else:
             self.quit_app()
+
+    def _probe(self, url: str) -> dict:
+        s = self.manager.settings
+        can_merge = bool(find_ffmpeg(s.get("ffmpeg_path") or None))
+        return ytdlp_probe(url, find_ytdlp(s.get("ytdlp_path") or None), can_merge)
 
     def _tray_enabled(self) -> bool:
         return self.tray is not None and bool(self.manager.settings.get("minimize_to_tray", True))

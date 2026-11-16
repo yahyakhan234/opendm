@@ -3,7 +3,8 @@
 YouTube doesn't serve plain files: it hands out scrambled, short-lived links that change
 whenever YouTube updates its player. Instead of chasing that ourselves, OpenDM drives
 yt-dlp (https://github.com/yt-dlp/yt-dlp), a widely used open-source tool that keeps up
-with those changes. yt-dlp is optional, just like ffmpeg:  winget install yt-dlp
+with those changes. OpenDM.exe ships with a copy of yt-dlp and keeps it updated; when
+running from source it's optional, just like ffmpeg:  winget install yt-dlp
 
 OpenDM shows yt-dlp's progress in its own window, and pausing stops yt-dlp, which resumes
 from its partial files next time. DRM-protected and live videos are refused.
@@ -23,7 +24,7 @@ import urllib.parse
 
 from .engine import Download, Status
 from .hls import find_ffmpeg
-from .util import category_for, sanitize_filename, unique_path
+from .util import category_for, data_dir, sanitize_filename, unique_path
 
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 SITES = re.compile(r"(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$", re.I)
@@ -41,9 +42,100 @@ def is_ytdlp_url(url: str) -> bool:
         return False
 
 
+def _managed_dir() -> str:
+    return os.path.join(data_dir(), "tools")
+
+
+def _bundled() -> tuple[str, str] | None:
+    """(path, version) of the yt-dlp.exe packed inside OpenDM.exe, if any."""
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        return None
+    exe = os.path.join(base, "tools", "yt-dlp.exe")
+    if not os.path.isfile(exe):
+        return None
+    try:
+        with open(os.path.join(base, "tools", "yt-dlp.version"), encoding="utf-8") as f:
+            version = f.read().strip()
+    except OSError:
+        version = ""
+    return exe, version
+
+
+def _read_state() -> dict:
+    try:
+        with open(os.path.join(_managed_dir(), "yt-dlp.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(state: dict) -> None:
+    try:
+        with open(os.path.join(_managed_dir(), "yt-dlp.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
+
+_managed_lock = threading.Lock()
+
+
+def managed_ytdlp() -> str | None:
+    """OpenDM's own copy of yt-dlp in the data folder.
+
+    The bundled copy is unpacked to a fresh temp folder on every launch, so it's copied
+    somewhere permanent where yt-dlp can update itself. A newer bundled copy (from a
+    newer OpenDM.exe) replaces an older one.
+    """
+    path = os.path.join(_managed_dir(), "yt-dlp.exe")
+    bundled = _bundled()
+    with _managed_lock:
+        if bundled:
+            src, version = bundled
+            current = _read_state().get("version", "")
+            if not os.path.isfile(path) or (version and version > current):
+                try:
+                    os.makedirs(_managed_dir(), exist_ok=True)
+                    tmp = path + ".new"
+                    shutil.copyfile(src, tmp)
+                    os.replace(tmp, path)
+                    _write_state({"version": version, "checked": 0})
+                except OSError:
+                    return src  # can't copy (disk full, file in use): use it from the temp folder
+    return path if os.path.isfile(path) else None
+
+
+def update_managed_ytdlp(max_age: float = 86400) -> str | None:
+    """Let OpenDM's own yt-dlp update itself (at most once a day). Returns the new version.
+
+    YouTube changes often and old yt-dlp versions stop working, so this matters.
+    Only OpenDM's own copy is touched, never one the user installed.
+    """
+    exe = managed_ytdlp()
+    if not exe or os.path.dirname(exe) != _managed_dir():
+        return None
+    state = _read_state()
+    if time.time() - state.get("checked", 0) < max_age:
+        return None
+    with _managed_lock:
+        try:
+            subprocess.run([exe, "-U"], capture_output=True, timeout=180, creationflags=NO_WINDOW, env=_env())
+            out = subprocess.run([exe, "--version"], capture_output=True, timeout=60,
+                                 creationflags=NO_WINDOW, env=_env())
+            version = out.stdout.decode("utf-8", "replace").strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        _write_state({"version": version or state.get("version", ""), "checked": time.time()})
+        return version
+
+
 def find_ytdlp(configured: str | None = None) -> str | None:
     if configured and os.path.isfile(configured):
         return configured
+    managed = managed_ytdlp()  # the copy that ships with OpenDM.exe, kept up to date
+    if managed:
+        return managed
     found = shutil.which("yt-dlp")
     if found:
         return found
@@ -91,11 +183,16 @@ def _last_error(text: str) -> str:
 _probe_cache: dict[str, tuple[float, dict]] = {}
 
 
-def probe(url: str, exe: str | None) -> dict:
-    """Ask yt-dlp which qualities a video has. Returns {title, duration, options: [...]}."""
+def probe(url: str, exe: str | None, can_merge: bool = True) -> dict:
+    """Ask yt-dlp which qualities a video has. Returns {title, duration, options: [...]}.
+
+    Without ffmpeg (can_merge=False) only qualities that come as one file with sound are
+    offered; on YouTube that's usually 360p. Higher ones need ffmpeg to join video and audio.
+    """
     if not exe:
         raise YtdlpMissing("yt-dlp isn't installed. Install it with: winget install yt-dlp")
-    hit = _probe_cache.get(url)
+    key = (url, can_merge)
+    hit = _probe_cache.get(key)
     if hit and time.time() - hit[0] < 600:
         return hit[1]
     proc = subprocess.run(
@@ -118,6 +215,8 @@ def probe(url: str, exe: str | None) -> dict:
             continue
         size = f.get("filesize") or f.get("filesize_approx") or 0
         if f.get("acodec") in (None, "none"):
+            if not can_merge:
+                continue
             size = size + audio_size if size else 0
         cur = best.get(h)
         if cur is None or size > cur["size"] or (f.get("fps") or 0) > cur["fps"]:
@@ -127,18 +226,21 @@ def probe(url: str, exe: str | None) -> dict:
         "duration": info.get("duration") or 0,
         "options": sorted(best.values(), key=lambda o: -o["height"]),
         "audio_size": audio_size,
+        "needs_ffmpeg": not can_merge,
     }
-    _probe_cache[url] = (time.time(), result)
+    _probe_cache[key] = (time.time(), result)
     return result
 
 
-def format_for(quality) -> str:
+def format_for(quality, can_merge: bool = True) -> str:
     if quality == "audio":
         return "bestaudio[ext=m4a]/bestaudio"
     try:
         h = int(quality or 0)
     except (TypeError, ValueError):
         h = 0
+    if not can_merge:  # no ffmpeg: only formats that already have video and sound together
+        return f"b[height<={h}]/b" if h else "b"
     if h:
         return f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"
     return "bv*+ba/b"
@@ -154,6 +256,7 @@ class YtdlpDownload(Download):
         self.ffmpeg_path: str | None = None
         self.stage = 0                  # yt-dlp downloads video and audio one after another
         self._stage_fmt = None
+        self._format = format_for(quality)
         self._done_bytes = 0            # bytes of finished stages
         self._cur = 0
         self._cur_total = 0
@@ -212,6 +315,8 @@ class YtdlpDownload(Download):
         return stem
 
     def _args(self, exe: str) -> list[str]:
+        ff = find_ffmpeg(self.ffmpeg_path)
+        self._format = format_for(self.quality, can_merge=bool(ff))
         out_tmpl = os.path.join(self.temp_dir, "%(title).150B [%(id)s].%(ext)s")
         progress = (f"download:{MARK} %(info.format_id)s %(progress.downloaded_bytes)s "
                     "%(progress.total_bytes)s %(progress.total_bytes_estimate)s")
@@ -222,17 +327,14 @@ class YtdlpDownload(Download):
             "--print", f"before_dl:{MARK}TITLE %(title)s",
             "--no-simulate", "--match-filter", "!is_live",
             "-N", str(max(1, min(16, self.connections))),
-            "-f", format_for(self.quality),
+            "-f", self._format,
             # Same resolution, but prefer H.264 + AAC: they play everywhere (TVs, editors,
             # the Windows player). Above 1080p YouTube only has VP9/AV1, which is used then.
             "-S", "res,vcodec:h264,acodec:aac",
             "-o", out_tmpl,
         ]
-        if self.quality == "audio":
-            pass  # keep the original m4a, no re-encoding
-        else:
+        if ff and self.quality != "audio":  # audio keeps the original m4a, no re-encoding
             args += ["--merge-output-format", "mp4"]
-        ff = find_ffmpeg(self.ffmpeg_path)
         if ff:
             args += ["--ffmpeg-location", ff]
         if self.limiter and self.limiter.rate > 0:
@@ -262,7 +364,7 @@ class YtdlpDownload(Download):
                 self._cur_total = total or est
                 # Estimate: finished stages + this stage (+ audio still to come for stage 0).
                 t = self._done_bytes + self._cur_total
-                if self.stage == 0 and "+" in format_for(self.quality) and self.quality != "audio":
+                if self.stage == 0 and "+" in self._format and self.quality != "audio":
                     t = int(t * 1.08)  # audio is usually a few % of a video
                 self.total = max(t, self.downloaded)
             if self.status == Status.CONNECTING:
@@ -275,6 +377,10 @@ class YtdlpDownload(Download):
             exe = find_ytdlp(self.ytdlp_path)
             if not exe:
                 raise YtdlpMissing("yt-dlp isn't installed. Install it with:  winget install yt-dlp")
+            if self.quality != "audio" and is_ytdlp_url(self.url) and not find_ffmpeg(self.ffmpeg_path):
+                # YouTube only serves video and sound as separate streams; ffmpeg joins them.
+                raise RuntimeError("YouTube video needs ffmpeg. Install it with:  winget install ffmpeg  "
+                                   "(or choose Audio only)")
             os.makedirs(self.temp_dir, exist_ok=True)
             self._done_bytes = self._cur = self._cur_total = 0
             self.stage = 0

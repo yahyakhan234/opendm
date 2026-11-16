@@ -554,6 +554,9 @@ async function ytOptions(pageUrl) {
     sub: [o.height >= 2160 ? "4K" : o.height >= 720 ? "HD" : "", fmtSize(o.size)].filter(Boolean).join(" · ") || "video",
   }));
   options.push({ id: "yt:audio", label: "Audio only", sub: ["M4A", fmtSize(r.audio_size)].filter(Boolean).join(" · ") });
+  if (r.needs_ffmpeg) {
+    options.push({ id: "yt:none", label: "Video needs ffmpeg", sub: "winget install ffmpeg", disabled: true });
+  }
   return { options };
 }
 
