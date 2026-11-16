@@ -15,7 +15,8 @@ from .engine import Status
 from .hls import find_ffmpeg
 from .ytdlp import find_ytdlp
 from .ytdlp import probe as ytdlp_probe
-from .icon import png_base64
+from . import tray
+from .icon import ico_bytes, png_base64
 from .manager import DownloadManager
 from .server import ApiServer
 from .util import CATEGORIES, category_for, human_size, human_time, is_url
@@ -130,7 +131,8 @@ class Dialog(tk.Toplevel):
         self.withdraw()
         self.title(title)
         self.configure(bg=BG)
-        self.transient(master)
+        if master.winfo_viewable():
+            self.transient(master)
         self.resizable(False, False)
         self.body = ttk.Frame(self, padding=18)
         self.body.pack(fill="both", expand=True)
@@ -283,30 +285,31 @@ class SettingsDialog(Dialog):
         check(5, "Watch the clipboard for download links", "clipboard_monitor")
         check(6, "Ask before starting downloads sent from the browser", "confirm_browser_downloads")
         check(7, "Sort finished files into category folders (Video, Music, Programs…)", "sort_into_categories")
+        check(8, "Keep running in the system tray when closed or minimized", "minimize_to_tray")
 
         ff = find_ffmpeg(s.get("ffmpeg_path") or None)
-        ttk.Label(b, text="ffmpeg (for videos)").grid(row=8, column=0, sticky="w", pady=(10, 4))
+        ttk.Label(b, text="ffmpeg (for videos)").grid(row=9, column=0, sticky="w", pady=(10, 4))
         self.ffmpeg = ttk.Entry(b, width=46)
         self.ffmpeg.insert(0, s.get("ffmpeg_path") or "")
-        self.ffmpeg.grid(row=8, column=1, sticky="ew", padx=10, pady=(10, 4))
-        ttk.Button(b, text="Browse…", command=self._browse_ffmpeg).grid(row=8, column=2, pady=(10, 4))
+        self.ffmpeg.grid(row=9, column=1, sticky="ew", padx=10, pady=(10, 4))
+        ttk.Button(b, text="Browse…", command=self._browse_ffmpeg).grid(row=9, column=2, pady=(10, 4))
         msg = (f"Found: {ff}" if ff else
                "Not found. Videos are saved as .ts; install it with:  winget install ffmpeg")
         ttk.Label(b, text=msg if len(msg) < 90 else "Found: …" + msg[-80:], style="MutedBg.TLabel").grid(
-            row=9, column=1, columnspan=2, sticky="w", padx=10)
+            row=10, column=1, columnspan=2, sticky="w", padx=10)
 
         yt = find_ytdlp(s.get("ytdlp_path") or None)
-        ttk.Label(b, text="yt-dlp (for YouTube)").grid(row=10, column=0, sticky="w", pady=(10, 4))
+        ttk.Label(b, text="yt-dlp (for YouTube)").grid(row=11, column=0, sticky="w", pady=(10, 4))
         self.ytdlp = ttk.Entry(b, width=46)
         self.ytdlp.insert(0, s.get("ytdlp_path") or "")
-        self.ytdlp.grid(row=10, column=1, sticky="ew", padx=10, pady=(10, 4))
-        ttk.Button(b, text="Browse…", command=self._browse_ytdlp).grid(row=10, column=2, pady=(10, 4))
+        self.ytdlp.grid(row=11, column=1, sticky="ew", padx=10, pady=(10, 4))
+        ttk.Button(b, text="Browse…", command=self._browse_ytdlp).grid(row=11, column=2, pady=(10, 4))
         msg = f"Found: {yt}" if yt else "Not found. Install it with:  winget install yt-dlp"
         ttk.Label(b, text=msg if len(msg) < 90 else "Found: …" + msg[-80:], style="MutedBg.TLabel").grid(
-            row=11, column=1, columnspan=2, sticky="w", padx=10)
+            row=12, column=1, columnspan=2, sticky="w", padx=10)
 
         btns = ttk.Frame(b)
-        btns.grid(row=12, column=0, columnspan=3, sticky="e", pady=(18, 0))
+        btns.grid(row=13, column=0, columnspan=3, sticky="e", pady=(18, 0))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
         ttk.Button(btns, text="Save", style="Accent.TButton", command=self._save).pack(side="right", padx=8)
         self.show()
@@ -427,6 +430,20 @@ class App(tk.Tk):
         except OSError:
             self.status_msg.set(f"Browser integration off: port {manager.settings['port']} is busy")
 
+        self.tray = None
+        self.tray_events: queue.Queue = queue.Queue()
+        if tray.AVAILABLE:
+            try:
+                ico = os.path.join(manager.root, "opendm.ico")
+                with open(ico, "wb") as f:
+                    f.write(ico_bytes((16, 20, 24, 32, 48, 64)))
+                self.tray = tray.TrayIcon(ico, APP_NAME, self.tray_events.put)
+                if not self.tray.start():
+                    self.tray = None
+            except OSError:
+                self.tray = None
+        self.bind("<Unmap>", self._on_unmap)
+
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Control-n>", lambda e: self.add_dialog())
         self.bind("<Delete>", lambda e: self.delete_selected())
@@ -438,6 +455,7 @@ class App(tk.Tk):
             pass
         self.refresh()
         self._poll()
+        self._tray_poll()
         self._clipboard_loop()
         if initial_urls:
             self.after(200, lambda: AddDialog(self, "\n".join(initial_urls)))
@@ -665,13 +683,12 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.refresh()
+        self._update_tray_tip()
         self.after(500, self._poll)
 
     def _from_browser(self, p: dict):
         if p.get("action") == "show":
-            self.deiconify()
-            self.lift()
-            self.focus_force()
+            self.show_window()
             return
         headers = {}
         if p.get("referrer"):
@@ -852,13 +869,77 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------- close
     def on_close(self):
+        if self._tray_enabled():
+            self.hide_to_tray()
+        else:
+            self.quit_app()
+
+    def _tray_enabled(self) -> bool:
+        return self.tray is not None and bool(self.manager.settings.get("minimize_to_tray", True))
+
+    def hide_to_tray(self):
+        self.withdraw()
+        if not self.manager.settings.get("tray_hint_shown"):
+            self.manager.settings["tray_hint_shown"] = True
+            self.manager.apply_settings()
+            self.tray.balloon(APP_NAME, "OpenDM is still running here, and downloads keep going. "
+                                        "Right-click the icon to exit.")
+
+    def show_window(self):
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(200, lambda: self.attributes("-topmost", False))
+        self.focus_force()
+
+    def _on_unmap(self, e):
+        # Minimize goes to the tray, like IDM.
+        if e.widget is self and self._tray_enabled() and self.state() == "iconic":
+            self.after(10, self.withdraw)
+
+    def _tray_poll(self):
+        try:
+            while True:
+                cmd = self.tray_events.get_nowait()
+                if cmd == "open":
+                    self.show_window()
+                elif cmd == "add":
+                    self.show_window()
+                    self.add_dialog()
+                elif cmd == "resume_all":
+                    self.manager.resume_all()
+                elif cmd == "pause_all":
+                    self.manager.pause_all()
+                elif cmd == "exit":
+                    self.quit_app()
+                    return
+        except queue.Empty:
+            pass
+        self.after(100, self._tray_poll)
+
+    def _update_tray_tip(self):
+        if not self.tray:
+            return
+        active = [d for d in self.manager.downloads if d.status in Status.ACTIVE]
+        if active:
+            speed = sum(d.speed for d in active)
+            tip = f"{APP_NAME} - {len(active)} downloading, {human_size(speed)}/s"
+        else:
+            tip = f"{APP_NAME} - no active downloads"
+        self.tray.set_tooltip(tip)
+
+    def quit_app(self):
         if any(d.status in Status.ACTIVE for d in self.manager.downloads):
+            self.show_window()
             if not messagebox.askyesno(APP_NAME, "Downloads are in progress.\n\nQuit anyway? "
                                                  "They'll pick up where they left off next time you open "
                                                  f"{APP_NAME}.", parent=self):
                 return
         self.status_msg.set("Saving…")
         self.update_idletasks()
+        if self.tray:
+            self.tray.stop()
         if self.server:
             self.server.stop()
         self.manager.shutdown()

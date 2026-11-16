@@ -30,6 +30,7 @@ a crash or a reboot, and catches downloads straight from your browser.
 - **Clipboard monitor (optional).** Copy a link to a file and OpenDM offers to download it.
 - **Categories.** Filter by Video, Music, Programs and more; optionally sort finished files into subfolders.
 - **Segment view.** See each connection's progress, like IDM's block view.
+- **System tray.** Closing or minimizing the window keeps OpenDM running in the tray, like IDM; downloads carry on. Click the icon to bring it back, or right-click for Add URL, Resume all, Pause all and Exit. You can turn this off in Settings.
 - **Single instance.** Running `opendm <url>` while the app is open hands the URL to the open window.
 
 ## Install & run
@@ -175,6 +176,7 @@ opendm/
   manager.py   queue, settings, persistence, speed limiter
   server.py    localhost API used by the browser extension (127.0.0.1:6801)
   gui.py       Tkinter interface
+  tray.py      system tray icon and menu (plain Windows API via ctypes)
   icon.py      app icon, drawn in code (python -m opendm.icon regenerates extension icons)
 extension/     browser extension for Firefox + Chromium (one Manifest V3 codebase)
                background.js: download catching + video detection; content.js: the video button

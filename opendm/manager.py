@@ -21,6 +21,8 @@ DEFAULT_SETTINGS = {
     "sort_into_categories": False,
     "ffmpeg_path": "",
     "ytdlp_path": "",
+    "minimize_to_tray": True,
+    "tray_hint_shown": False,
 }
 
 class DownloadManager:
