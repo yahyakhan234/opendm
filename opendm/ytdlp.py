@@ -3,8 +3,8 @@
 YouTube doesn't serve plain files: it hands out scrambled, short-lived links that change
 whenever YouTube updates its player. Instead of chasing that ourselves, OpenDM drives
 yt-dlp (https://github.com/yt-dlp/yt-dlp), a widely used open-source tool that keeps up
-with those changes. OpenDM.exe ships with a copy of yt-dlp and keeps it updated; when
-running from source it's optional, just like ffmpeg:  winget install yt-dlp
+with those changes. OpenDM.exe ships with yt-dlp (and ffmpeg) and keeps yt-dlp updated;
+when running from source install them yourself:  winget install yt-dlp ffmpeg
 
 OpenDM shows yt-dlp's progress in its own window, and pausing stops yt-dlp, which resumes
 from its partial files next time. DRM-protected and live videos are refused.
@@ -24,7 +24,8 @@ import urllib.parse
 
 from .engine import Download, Status
 from .hls import find_ffmpeg
-from .util import category_for, data_dir, sanitize_filename, unique_path
+from . import bundle
+from .util import category_for, sanitize_filename, unique_path
 
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 SITES = re.compile(r"(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$", re.I)
@@ -42,68 +43,12 @@ def is_ytdlp_url(url: str) -> bool:
         return False
 
 
-def _managed_dir() -> str:
-    return os.path.join(data_dir(), "tools")
-
-
-def _bundled() -> tuple[str, str] | None:
-    """(path, version) of the yt-dlp.exe packed inside OpenDM.exe, if any."""
-    base = getattr(sys, "_MEIPASS", None)
-    if not base:
-        return None
-    exe = os.path.join(base, "tools", "yt-dlp.exe")
-    if not os.path.isfile(exe):
-        return None
-    try:
-        with open(os.path.join(base, "tools", "yt-dlp.version"), encoding="utf-8") as f:
-            version = f.read().strip()
-    except OSError:
-        version = ""
-    return exe, version
-
-
-def _read_state() -> dict:
-    try:
-        with open(os.path.join(_managed_dir(), "yt-dlp.json"), encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def _write_state(state: dict) -> None:
-    try:
-        with open(os.path.join(_managed_dir(), "yt-dlp.json"), "w", encoding="utf-8") as f:
-            json.dump(state, f)
-    except OSError:
-        pass
-
-
-_managed_lock = threading.Lock()
+_update_lock = threading.Lock()
 
 
 def managed_ytdlp() -> str | None:
-    """OpenDM's own copy of yt-dlp in the data folder.
-
-    The bundled copy is unpacked to a fresh temp folder on every launch, so it's copied
-    somewhere permanent where yt-dlp can update itself. A newer bundled copy (from a
-    newer OpenDM.exe) replaces an older one.
-    """
-    path = os.path.join(_managed_dir(), "yt-dlp.exe")
-    bundled = _bundled()
-    with _managed_lock:
-        if bundled:
-            src, version = bundled
-            current = _read_state().get("version", "")
-            if not os.path.isfile(path) or (version and version > current):
-                try:
-                    os.makedirs(_managed_dir(), exist_ok=True)
-                    tmp = path + ".new"
-                    shutil.copyfile(src, tmp)
-                    os.replace(tmp, path)
-                    _write_state({"version": version, "checked": 0})
-                except OSError:
-                    return src  # can't copy (disk full, file in use): use it from the temp folder
-    return path if os.path.isfile(path) else None
+    """OpenDM's own copy of yt-dlp (unpacked from OpenDM.exe into the data folder)."""
+    return bundle.install("yt-dlp")
 
 
 def update_managed_ytdlp(max_age: float = 86400) -> str | None:
@@ -113,12 +58,12 @@ def update_managed_ytdlp(max_age: float = 86400) -> str | None:
     Only OpenDM's own copy is touched, never one the user installed.
     """
     exe = managed_ytdlp()
-    if not exe or os.path.dirname(exe) != _managed_dir():
+    if not bundle.is_managed(exe):
         return None
-    state = _read_state()
+    state = bundle.read_state("yt-dlp")
     if time.time() - state.get("checked", 0) < max_age:
         return None
-    with _managed_lock:
+    with _update_lock:
         try:
             subprocess.run([exe, "-U"], capture_output=True, timeout=180, creationflags=NO_WINDOW, env=_env())
             out = subprocess.run([exe, "--version"], capture_output=True, timeout=60,
@@ -126,7 +71,7 @@ def update_managed_ytdlp(max_age: float = 86400) -> str | None:
             version = out.stdout.decode("utf-8", "replace").strip()
         except (OSError, subprocess.SubprocessError):
             return None
-        _write_state({"version": version or state.get("version", ""), "checked": time.time()})
+        bundle.write_state("yt-dlp", {"version": version or state.get("version", ""), "checked": time.time()})
         return version
 
 
@@ -379,8 +324,8 @@ class YtdlpDownload(Download):
                 raise YtdlpMissing("yt-dlp isn't installed. Install it with:  winget install yt-dlp")
             if self.quality != "audio" and is_ytdlp_url(self.url) and not find_ffmpeg(self.ffmpeg_path):
                 # YouTube only serves video and sound as separate streams; ffmpeg joins them.
-                raise RuntimeError("YouTube video needs ffmpeg. Install it with:  winget install ffmpeg  "
-                                   "(or choose Audio only)")
+                raise RuntimeError("YouTube video needs ffmpeg, which wasn't found. Install it with:  "
+                                   "winget install ffmpeg  (or choose Audio only)")
             os.makedirs(self.temp_dir, exist_ok=True)
             self._done_bytes = self._cur = self._cur_total = 0
             self.stage = 0

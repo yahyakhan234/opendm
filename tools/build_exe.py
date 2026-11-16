@@ -4,19 +4,25 @@
     .venv\Scripts\pip install pyinstaller
     .venv\Scripts\python tools/build_exe.py
 
-Writes dist/OpenDM.exe with yt-dlp packed inside, so YouTube works out of the box.
-The yt-dlp.exe installed on this PC is used (winget install yt-dlp), or pass
---ytdlp PATH; --no-ytdlp builds without it. At runtime OpenDM copies it to its data
-folder and lets it update itself daily.
+Writes dist/OpenDM.exe with yt-dlp and ffmpeg packed inside, so the person running it
+needs nothing else. The copies installed on this PC are used:
 
-ffmpeg is not bundled (it's large); OpenDM uses it if installed (winget install ffmpeg).
+    winget install yt-dlp        (also installs yt-dlp's own ffmpeg build, used here)
+
+or pass --ytdlp PATH / --ffmpeg PATH; --no-ytdlp / --no-ffmpeg leave them out.
+At runtime OpenDM unpacks them once into its data folder; yt-dlp updates itself daily.
+
+ffmpeg is GPL-licensed: its license and where to get its source go into the zip next to it.
 """
 
 import argparse
+import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(ROOT, "build")
@@ -66,13 +72,74 @@ def stage_ytdlp(path: str | None) -> list[str]:
             "--add-data", f"{os.path.join(tools, 'yt-dlp.version')}{os.pathsep}tools"]
 
 
+def _installed_ffmpeg() -> str | None:
+    """Prefer yt-dlp's own ffmpeg build (it carries fixes yt-dlp relies on)."""
+    pkgs = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages")
+    for pattern in ("yt-dlp.FFmpeg_*", "Gyan.FFmpeg*", "*FFmpeg*"):
+        hits = sorted(glob.glob(os.path.join(pkgs, pattern, "*", "bin", "ffmpeg.exe")))
+        if hits:
+            return hits[-1]
+    return shutil.which("ffmpeg")
+
+
+FFMPEG_SOURCE_NOTE = """This ffmpeg.exe is a GPL build of FFmpeg (https://ffmpeg.org), shipped unmodified
+with OpenDM so videos can be joined and saved as .mp4. OpenDM runs it as a separate program.
+
+FFmpeg source code: https://ffmpeg.org/download.html  (git: https://git.ffmpeg.org/ffmpeg.git)
+Build scripts for this build: https://github.com/yt-dlp/FFmpeg-Builds
+Version: {version}
+
+Its license (GPL) is in ffmpeg-LICENSE.txt next to this file.
+"""
+
+
+def stage_ffmpeg(path: str | None) -> list[str]:
+    """Pack ffmpeg.exe + its license into build/tools/ffmpeg.zip; return PyInstaller arguments."""
+    exe = path or _installed_ffmpeg()
+    if not exe or not os.path.isfile(exe):
+        raise SystemExit("ffmpeg.exe not found. Install it (winget install yt-dlp.FFmpeg), "
+                         "pass --ffmpeg PATH, or build without it using --no-ffmpeg.")
+    out = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=60).stdout
+    first = out.splitlines()[0] if out else ""
+    raw = first.split(" ")[2] if first.startswith("ffmpeg version ") else "unknown"
+    date = re.search(r"(20\d\d)(\d\d)(\d\d)$", raw)
+    # Sortable, so a newer OpenDM.exe replaces an older unpacked copy.
+    version = f"{date.group(1)}.{date.group(2)}.{date.group(3)} {raw}" if date else raw
+    licence = None
+    folder = os.path.dirname(exe)
+    for cand in (os.path.join(folder, "..", "LICENSE.txt"), os.path.join(folder, "LICENSE.txt"),
+                 os.path.join(folder, "..", "LICENSE")):
+        if os.path.isfile(cand):
+            licence = cand
+            break
+    if not licence:
+        raise SystemExit(f"No LICENSE file found next to {exe}; it must ship with ffmpeg.")
+    tools = os.path.join(BUILD, "tools")
+    os.makedirs(tools, exist_ok=True)
+    zpath = os.path.join(tools, "ffmpeg.zip")
+    print(f"bundling ffmpeg {raw} from {exe} (compressing, takes a minute)")
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_LZMA) as z:
+        z.write(exe, "ffmpeg.exe")
+        z.write(licence, "LICENSE.txt")
+        z.writestr("SOURCE.txt", FFMPEG_SOURCE_NOTE.format(version=raw))
+    with open(os.path.join(tools, "ffmpeg.version"), "w", encoding="utf-8") as f:
+        f.write(version)
+    print(f"  ffmpeg.zip: {os.path.getsize(zpath) / 1e6:.0f} MB")
+    return ["--add-data", f"{zpath}{os.pathsep}tools",
+            "--add-data", f"{os.path.join(tools, 'ffmpeg.version')}{os.pathsep}tools"]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build dist/OpenDM.exe")
     ap.add_argument("--ytdlp", help="yt-dlp.exe to bundle (default: the installed one)")
     ap.add_argument("--no-ytdlp", action="store_true", help="don't bundle yt-dlp")
+    ap.add_argument("--ffmpeg", help="ffmpeg.exe to bundle (default: the installed one)")
+    ap.add_argument("--no-ffmpeg", action="store_true", help="don't bundle ffmpeg")
     opts = ap.parse_args()
     os.makedirs(BUILD, exist_ok=True)
+    shutil.rmtree(os.path.join(BUILD, "tools"), ignore_errors=True)
     extra = [] if opts.no_ytdlp else stage_ytdlp(opts.ytdlp)
+    extra += [] if opts.no_ffmpeg else stage_ffmpeg(opts.ffmpeg)
     ico = os.path.join(BUILD, "opendm.ico")
     with open(ico, "wb") as f:
         f.write(ico_bytes())

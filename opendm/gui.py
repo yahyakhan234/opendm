@@ -14,7 +14,8 @@ from tkinter import filedialog, messagebox, ttk
 from . import APP_NAME, __version__
 from .engine import Status
 from .hls import find_ffmpeg
-from .ytdlp import find_ytdlp, managed_ytdlp, update_managed_ytdlp
+from .ytdlp import find_ytdlp, update_managed_ytdlp
+from . import bundle
 from .ytdlp import probe as ytdlp_probe
 from . import tray
 from .icon import ico_bytes, png_base64
@@ -294,8 +295,11 @@ class SettingsDialog(Dialog):
         self.ffmpeg.insert(0, s.get("ffmpeg_path") or "")
         self.ffmpeg.grid(row=9, column=1, sticky="ew", padx=10, pady=(10, 4))
         ttk.Button(b, text="Browse…", command=self._browse_ffmpeg).grid(row=9, column=2, pady=(10, 4))
-        msg = (f"Found: {ff}" if ff else
-               "Not found. Videos are saved as .ts; install it with:  winget install ffmpeg")
+        if bundle.is_managed(ff):
+            msg = "Built in (comes with OpenDM)"
+        else:
+            msg = (f"Found: {ff}" if ff else
+                   "Not found. Videos are saved as .ts; install it with:  winget install ffmpeg")
         ttk.Label(b, text=msg if len(msg) < 90 else "Found: …" + msg[-80:], style="MutedBg.TLabel").grid(
             row=10, column=1, columnspan=2, sticky="w", padx=10)
 
@@ -305,7 +309,7 @@ class SettingsDialog(Dialog):
         self.ytdlp.insert(0, s.get("ytdlp_path") or "")
         self.ytdlp.grid(row=11, column=1, sticky="ew", padx=10, pady=(10, 4))
         ttk.Button(b, text="Browse…", command=self._browse_ytdlp).grid(row=11, column=2, pady=(10, 4))
-        if yt and yt == managed_ytdlp():
+        if bundle.is_managed(yt):
             msg = "Built in (comes with OpenDM and updates itself daily)"
         else:
             msg = f"Found: {yt}" if yt else "Not found. Install it with:  winget install yt-dlp"
@@ -448,7 +452,7 @@ class App(tk.Tk):
                 self.tray = None
         self.bind("<Unmap>", self._on_unmap)
         # The yt-dlp that ships with OpenDM.exe updates itself once a day; YouTube breaks old versions.
-        threading.Thread(target=update_managed_ytdlp, name="yt-dlp-update", daemon=True).start()
+        threading.Thread(target=self._prepare_tools, name="tools", daemon=True).start()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Control-n>", lambda e: self.add_dialog())
@@ -879,6 +883,13 @@ class App(tk.Tk):
             self.hide_to_tray()
         else:
             self.quit_app()
+
+    @staticmethod
+    def _prepare_tools():
+        # Unpack the bundled ffmpeg now (it takes a few seconds the first time) rather than
+        # when the first video is requested, then let yt-dlp check for an update.
+        bundle.install("ffmpeg")
+        update_managed_ytdlp()
 
     def _probe(self, url: str) -> dict:
         s = self.manager.settings

@@ -11,7 +11,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from opendm import ytdlp  # noqa: E402
+from opendm import bundle, ytdlp  # noqa: E402
 from opendm.engine import Status  # noqa: E402
 from opendm.manager import DownloadManager  # noqa: E402
 from opendm.server import ApiServer  # noqa: E402
@@ -135,8 +135,8 @@ class YtdlpTests(unittest.TestCase):
             ytdlp.find_ffmpeg = orig
 
     def test_bundled_copy_is_installed_and_upgraded(self):
-        bundle = os.path.join(self.tmp, "meipass", "tools")
-        os.makedirs(bundle)
+        shipped = os.path.join(self.tmp, "meipass", "tools")
+        os.makedirs(shipped)
         data = os.path.join(self.tmp, "appdata")
 
         def read(path):
@@ -144,14 +144,14 @@ class YtdlpTests(unittest.TestCase):
                 return f.read()
 
         def ship(version, content):
-            with open(os.path.join(bundle, "yt-dlp.exe"), "wb") as f:
+            with open(os.path.join(shipped, "yt-dlp.exe"), "wb") as f:
                 f.write(content)
-            with open(os.path.join(bundle, "yt-dlp.version"), "w") as f:
+            with open(os.path.join(shipped, "yt-dlp.version"), "w") as f:
                 f.write(version)
 
         old_env = os.environ.get("OPENDM_DATA")
         os.environ["OPENDM_DATA"] = data
-        sys._MEIPASS = os.path.dirname(bundle)
+        sys._MEIPASS = os.path.dirname(shipped)
         try:
             ship("2026.01.01", b"v1")
             path = ytdlp.find_ytdlp()
@@ -160,7 +160,7 @@ class YtdlpTests(unittest.TestCase):
             # yt-dlp updated itself since: an older bundle must not overwrite it.
             with open(path, "wb") as f:
                 f.write(b"self-updated")
-            ytdlp._write_state({"version": "2026.06.01", "checked": 0})
+            bundle.write_state("yt-dlp", {"version": "2026.06.01", "checked": 0})
             ship("2026.03.01", b"v2")
             self.assertEqual(read(ytdlp.find_ytdlp()), b"self-updated")
             # A newer OpenDM.exe ships a newer yt-dlp: that one wins.
@@ -168,6 +168,37 @@ class YtdlpTests(unittest.TestCase):
             self.assertEqual(read(ytdlp.find_ytdlp()), b"v3")
             # A path chosen in Settings always comes first.
             self.assertEqual(ytdlp.find_ytdlp(FAKE), FAKE)
+        finally:
+            del sys._MEIPASS
+            if old_env is None:
+                os.environ.pop("OPENDM_DATA", None)
+            else:
+                os.environ["OPENDM_DATA"] = old_env
+
+    def test_bundled_ffmpeg_zip_is_unpacked(self):
+        import zipfile
+
+        from opendm import hls
+
+        bundle_dir = os.path.join(self.tmp, "meipass", "tools")
+        os.makedirs(bundle_dir)
+        with zipfile.ZipFile(os.path.join(bundle_dir, "ffmpeg.zip"), "w", zipfile.ZIP_LZMA) as z:
+            z.writestr("ffmpeg.exe", b"ffmpeg-binary" * 1000)
+            z.writestr("LICENSE.txt", "GPL")
+        with open(os.path.join(bundle_dir, "ffmpeg.version"), "w") as f:
+            f.write("2026.09.30")
+        data = os.path.join(self.tmp, "appdata")
+        old_env = os.environ.get("OPENDM_DATA")
+        os.environ["OPENDM_DATA"] = data
+        sys._MEIPASS = os.path.dirname(bundle_dir)
+        try:
+            path = hls.find_ffmpeg()
+            self.assertEqual(path, os.path.join(data, "tools", "ffmpeg.exe"))
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), b"ffmpeg-binary" * 1000)
+            self.assertTrue(os.path.isfile(os.path.join(data, "tools", "ffmpeg-LICENSE.txt")))
+            self.assertTrue(bundle.is_managed(path))
+            self.assertEqual(hls.find_ffmpeg(FAKE), FAKE, "a path chosen in Settings comes first")
         finally:
             del sys._MEIPASS
             if old_env is None:

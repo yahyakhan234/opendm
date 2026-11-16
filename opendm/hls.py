@@ -28,6 +28,7 @@ import urllib.parse
 
 from .aes import decrypt_cbc
 from .engine import CHUNK, MAX_RETRIES, NETWORK_ERRORS, Download, Status, friendly_error
+from . import bundle
 from .util import category_for, filename_from_url, sanitize_filename, unique_path
 
 
@@ -185,6 +186,9 @@ def parse_media(text: str, base: str) -> dict:
 def find_ffmpeg(configured: str | None = None) -> str | None:
     if configured and os.path.isfile(configured):
         return configured
+    managed = bundle.install("ffmpeg")  # the copy that ships with OpenDM.exe
+    if managed:
+        return managed
     found = shutil.which("ffmpeg")
     if found:
         return found

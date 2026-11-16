@@ -23,7 +23,7 @@ a crash or a reboot, and catches downloads straight from your browser.
   (1080p, 720p…) and OpenDM downloads it over several connections, decrypting standard
   AES-128 streams and merging video + audio into one `.mp4`. Works with HLS (`.m3u8`) streams and
   plain video files; you can also paste an `.m3u8` link into **Add URL**.
-- **YouTube** (through [yt-dlp](https://github.com/yt-dlp/yt-dlp), built into the exe; video also needs ffmpeg). The same button lists YouTube's
+- **YouTube** (through [yt-dlp](https://github.com/yt-dlp/yt-dlp), built into the exe). The same button lists YouTube's
   real qualities with sizes, plus **Audio only**. You can also paste a YouTube link into **Add URL**.
 - **Right-click menu.** "Download with OpenDM" on any link, image or video, plus
   "Download all links on this page".
@@ -38,11 +38,13 @@ a crash or a reboot, and catches downloads straight from your browser.
 ### Easiest: the exe
 
 Download **`OpenDM.exe`** from the [latest release](https://github.com/yahyakhan234/opendm/releases/latest)
-and double-click it. No Python or install needed. Settings and the download list are kept in
-`%LOCALAPPDATA%\OpenDM`, so you can move the exe anywhere.
+and double-click it. Nothing else to install: Python, yt-dlp and ffmpeg are all inside.
+Settings, the download list and the unpacked tools are kept in `%LOCALAPPDATA%\OpenDM`, so you can
+move the exe anywhere.
 
 The exe isn't code-signed, so the first time Windows may show "Windows protected your PC".
-Click **More info** → **Run anyway**. It takes a few seconds to start because it unpacks itself first.
+Click **More info** → **Run anyway**. It takes about 5 seconds to start because it unpacks itself first.
+The very first launch also unpacks yt-dlp and ffmpeg (about 190 MB) into the data folder.
 
 ### From source
 
@@ -113,21 +115,23 @@ python -m venv .venv
 .venv\Scripts\python tools/build_exe.py
 ```
 
-This writes `dist/OpenDM.exe` with the yt-dlp installed on your PC packed inside (`--no-ytdlp` leaves it out).
-ffmpeg isn't bundled because it's large (around 170 MB); the exe uses it if it's installed.
+This writes `dist/OpenDM.exe` (about 80 MB) with yt-dlp and ffmpeg packed inside, taken from the copies
+installed on your PC. `winget install yt-dlp` installs both (yt-dlp's own ffmpeg build is preferred).
+Use `--ytdlp PATH` / `--ffmpeg PATH` to pick other copies, or `--no-ytdlp` / `--no-ffmpeg` to leave them out.
 
 ### Downloading videos
 
 Play a video, hover it, and click **Download this video**. Then pick a quality.
 The extension icon shows how many videos it found on the page, and the popup lists them too.
 
-- **ffmpeg** (optional, recommended) turns streams into normal `.mp4` files and merges separate
-  audio tracks. Install it with `winget install ffmpeg`. OpenDM finds it automatically, or you can
-  set its location in Settings. Without it, videos are saved as `.ts`, which VLC and most players handle.
-- **YouTube** uses yt-dlp. `OpenDM.exe` comes with it and lets it update itself once a day, since
-  YouTube changes often and old versions stop working. Running from source, install it with
-  `winget install yt-dlp`. **YouTube video also needs ffmpeg**: YouTube now sends video and sound as
-  separate streams, and ffmpeg joins them. Without ffmpeg only **Audio only** is offered.
+- **ffmpeg** turns streams into normal `.mp4` files and merges separate audio tracks. It's built into
+  `OpenDM.exe`. Running from source, install it with `winget install ffmpeg`; OpenDM finds it
+  automatically, or you can set its location in Settings. Without it, streams are saved as `.ts`,
+  which VLC and most players handle.
+- **YouTube** uses yt-dlp and ffmpeg (YouTube sends video and sound as separate streams, and ffmpeg
+  joins them). `OpenDM.exe` comes with both and lets yt-dlp update itself once a day, since YouTube
+  changes often and old versions stop working. Running from source, install them with
+  `winget install yt-dlp ffmpeg`; without ffmpeg only **Audio only** is offered.
   OpenDM runs yt-dlp in the background, showing progress, pause and resume in the
   OpenDM window. Files are H.264 + AAC `.mp4` up to 1080p (VP9/AV1 above that, which is all YouTube
   offers there), or `.m4a` for audio only. If you installed yt-dlp yourself and downloads start
@@ -177,6 +181,7 @@ opendm/
   hls.py       video stream (HLS/.m3u8) downloader: quality choice, chunks, AES-128, ffmpeg merge
   aes.py       AES-128 decryption (Windows crypto API, pure-Python fallback)
   ytdlp.py     YouTube via yt-dlp: quality lookup, progress parsing, pause/resume
+  bundle.py    unpacks the yt-dlp and ffmpeg that ship inside OpenDM.exe
   manager.py   queue, settings, persistence, speed limiter
   server.py    localhost API used by the browser extension (127.0.0.1:6801)
   gui.py       Tkinter interface
@@ -212,4 +217,11 @@ PRs welcome!
 
 ## License
 
-[MIT](LICENSE)
+OpenDM is [MIT](LICENSE) licensed.
+
+`OpenDM.exe` also contains two separate programs that OpenDM runs, each under its own license:
+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp): the Unlicense (public domain).
+- [FFmpeg](https://ffmpeg.org): GPL, from the [yt-dlp FFmpeg builds](https://github.com/yt-dlp/FFmpeg-Builds),
+  unmodified. Its license and where to get its source are unpacked next to it as
+  `%LOCALAPPDATA%\OpenDM\tools\ffmpeg-LICENSE.txt` and `ffmpeg-SOURCE.txt`.
