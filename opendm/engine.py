@@ -27,7 +27,10 @@ import urllib.error
 import urllib.request
 import uuid
 
+from . import __version__, net
 from .util import category_for, filename_from_disposition, filename_from_url, sanitize_filename, unique_path
+
+net.install()  # try IPv6 and IPv4 addresses in parallel, like browsers do
 
 CHUNK = 64 * 1024
 MIN_SPLIT = 1024 * 1024          # never split a segment into pieces smaller than this
@@ -37,6 +40,9 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 )
+# Some servers' bot protection hangs up on a client that calls itself Chrome but doesn't
+# connect like Chrome does. If the first request is refused, we retry under our own name.
+PLAIN_USER_AGENT = f"OpenDM/{__version__}"
 
 NETWORK_ERRORS = (
     urllib.error.URLError,
@@ -265,14 +271,26 @@ class Download:
         req = urllib.request.Request(url, headers=headers)
         return urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT)
 
-    def _probe(self) -> None:
-        """Find size, final URL, filename and range support."""
+    def _first_request(self):
         try:
-            r = self._request(self.url, "bytes=0-0")
+            return self._request(self.url, "bytes=0-0")
         except urllib.error.HTTPError as e:
             if e.code != 416:
                 raise
-            r = self._request(self.url)  # some servers reject ranges on tiny/empty files
+            return self._request(self.url)  # some servers reject ranges on tiny/empty files
+
+    def _probe(self) -> None:
+        """Find size, final URL, filename and range support."""
+        own_agent = any(k.lower() == "user-agent" for k in self.headers)  # e.g. the browser's
+        try:
+            r = self._first_request()
+        except (urllib.error.HTTPError, http.client.RemoteDisconnected, ConnectionResetError,
+                ConnectionAbortedError) as e:
+            refused = not isinstance(e, urllib.error.HTTPError) or e.code == 403
+            if own_agent or not refused:
+                raise
+            self.headers["User-Agent"] = PLAIN_USER_AGENT  # kept for every connection of this download
+            r = self._first_request()
         with r:
             self.final_url = r.geturl() or self.url
             code = getattr(r, "status", None) or r.getcode() or 200

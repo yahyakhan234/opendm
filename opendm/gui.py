@@ -400,7 +400,7 @@ class Toast(tk.Toplevel):
 class App(tk.Tk):
     COLUMNS = (
         ("name", "File name", 320, "w"),
-        ("size", "Size", 90, "e"),
+        ("size", "Size", 100, "e"),
         ("progress", "Progress", 190, "w"),
         ("speed", "Speed", 100, "e"),
         ("eta", "Time left", 90, "e"),
@@ -718,7 +718,8 @@ class App(tk.Tk):
             for u in urls:
                 self.manager.add(u, filename=(p.get("filename") or None) if len(urls) == 1 else None,
                                  headers=headers, **(media if len(urls) == 1 else {}))
-            self.status_msg.set(f"Added {len(urls)} download(s) from the browser")
+            n = len(urls)
+            self.status_msg.set(f"Added {n} download{'s' if n != 1 else ''} from the browser")
 
     def _clipboard_loop(self):
         if self.manager.settings.get("clipboard_monitor"):

@@ -30,12 +30,20 @@ class Handler(BaseHTTPRequestHandler):
     slow_first = False # throttle only the connection that starts at byte 0
     ranges = True
     requests = 0
+    block_chrome = False  # hang up on clients calling themselves Chrome (like some bot filters)
+    agents: list = []
 
     def log_message(self, *a):
         pass
 
     def do_GET(self):
         type(self).requests += 1
+        ua = self.headers.get("User-Agent", "")
+        type(self).agents.append(ua)
+        if self.block_chrome and "Chrome" in ua:
+            self.close_connection = True
+            self.connection.shutdown(2)  # no response at all
+            return
         start, end = 0, len(DATA) - 1
         rng = self.headers.get("Range")
         m = re.match(r"bytes=(\d+)-(\d*)", rng or "")
@@ -77,8 +85,9 @@ class EngineTests(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        Handler.flaky = Handler.slow = Handler.slow_first = False
+        Handler.flaky = Handler.slow = Handler.slow_first = Handler.block_chrome = False
         Handler.ranges = True
+        Handler.agents = []
         self.tmp = tempfile.mkdtemp()
         self.out = os.path.join(self.tmp, "out")
         self.dm = DownloadManager(root=os.path.join(self.tmp, "data"))
@@ -106,6 +115,23 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(dl.filename, "test file.bin")
         self.assertTrue(dl.resumable)
         self.assertFalse(os.path.exists(dl.temp_dir), "temp segments should be cleaned up")
+
+    def test_retries_under_own_name_when_refused(self):
+        Handler.block_chrome = True
+        dl = self.dm.add(self.url, folder=self.out, connections=4)
+        self.wait(dl, {Status.COMPLETE, Status.ERROR})
+        self.check_file(dl)
+        self.assertTrue(Handler.agents[0].startswith("Mozilla/"), "browser-like name is tried first")
+        self.assertTrue(all(a.startswith("OpenDM/") for a in Handler.agents[1:]),
+                        "every later connection uses the name that worked")
+
+    def test_browser_supplied_name_is_kept(self):
+        Handler.block_chrome = True
+        ua = "Mozilla/5.0 Chrome/131 (from the browser)"
+        dl = self.dm.add(self.url, folder=self.out, headers={"User-Agent": ua})
+        self.wait(dl, {Status.COMPLETE, Status.ERROR})
+        self.assertEqual(dl.status, Status.ERROR)
+        self.assertEqual(set(Handler.agents), {ua})
 
     def test_dynamic_segmentation_splits(self):
         Handler.slow_first = True
